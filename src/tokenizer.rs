@@ -85,6 +85,7 @@ fn vec_to_string_opt(v: &[u8]) -> Option<String> {
 }
 
 const READ_BUFFER_SIZE: usize = 8192;
+const MAX_TOKEN_LEN: usize = 64;
 
 impl FileTokenIterator {
     pub fn new(file_name: &str, offset: u64) -> std::io::Result<FileTokenIterator> {
@@ -108,40 +109,40 @@ impl FileTokenIterator {
             return Some(String::from("</s>"));
         }
 
-        loop {
+        let mut output: Option<String> = None;
+
+        'readloop: loop {
+            // Read data if read buffer is empty
             if self.start_pos == self.end_pos {
                 self.start_pos = 0;
-                self.end_pos = match self.file.read(&mut self.read_buffer[..]) {
-                    Ok(n) => n,
-                    Err(_) => 0,
-                };
+                self.end_pos = self.file.read(&mut self.read_buffer[..]).unwrap_or(0);
                 if self.end_pos == 0 {
-                    if self.rest.is_empty() {
-                        return None;
-                    } else {
-                        let output = vec_to_string_opt(&self.rest);
+                    if !self.rest.is_empty() {
+                        output = vec_to_string_opt(&self.rest);
                         self.rest.clear();
-                        return output;
                     }
+                    break 'readloop output;
                 }
             }
 
+            // Check if we have trailing data from a previous read. If we can form a
+            // token together with the current read, return it
             if !self.rest.is_empty() {
-                if let Some(pos) = self.read_buffer[self.start_pos..]
+                if let Some(pos) = self.read_buffer[self.start_pos..self.end_pos]
                     .iter()
                     .position(is_separator)
                 {
                     self.rest
                         .extend_from_slice(&self.read_buffer[self.start_pos..self.start_pos + pos]);
 
-                    let output = vec_to_string_opt(&self.rest);
-                    self.rest.clear();
                     if self.read_buffer[self.start_pos + pos] == b'\n' {
                         self.output_separator = true;
                     }
 
                     self.start_pos += pos + 1;
-                    return output;
+                    output = vec_to_string_opt(&self.rest);
+                    self.rest.clear();
+                    break 'readloop output;
                 }
             }
 
@@ -149,33 +150,40 @@ impl FileTokenIterator {
             let mut token_end: usize = token_start;
 
             for byte in &self.read_buffer[self.start_pos..self.end_pos] {
-                if is_separator(byte) {
-                    let mut output: Option<String> = None;
-                    if token_end > token_start {
-                        self.start_pos = token_end + 1;
-                        output = vec_to_string_opt(&self.read_buffer[token_start..token_end]);
-                    }
+                if !is_separator(byte) {
+                    token_end += 1;
+                    continue;
+                }
+
+                if *byte == b'\n' {
+                    self.output_separator = true;
+                }
+
+                if token_end == token_start {
+                    // empty token, skip it
                     token_end += 1;
                     token_start = token_end;
-
-                    if output != None {
-                        if *byte == b'\n' {
-                            self.output_separator = true;
-                        }
-                        return output;
-                    }
-                } else {
-                    token_end += 1;
+                    continue;
                 }
+
+                output = vec_to_string_opt(&self.read_buffer[token_start..token_end]);
+                self.start_pos = token_end + 1;
+                break 'readloop output;
             }
 
-            if (token_end - token_start) != 0 {
+            if token_end > token_start {
                 self.rest
                     .extend_from_slice(&self.read_buffer[token_start..token_end]);
                 self.start_pos = self.end_pos;
-                continue;
+                if self.rest.len() < MAX_TOKEN_LEN {
+                    continue 'readloop;
+                }
+
+                output = vec_to_string_opt(&self.rest);
+                self.rest.clear();
+                break 'readloop output;
             }
-            return None;
+            break 'readloop output;
         }
     }
 }
