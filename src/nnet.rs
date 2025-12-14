@@ -1,3 +1,11 @@
+// #![allow(dead_code)]
+// #![allow(unused_variables)]
+// #![allow(unused_mut)]
+
+// use std::fmt::Error;
+use crate::tokenizer::FileTokenIterator;
+use crate::vocab::Vocabulary;
+
 pub struct NeuralNet {
     vocab_size: usize,
     layer1_size: usize,
@@ -38,8 +46,253 @@ impl NeuralNet {
     }
 }
 
-// pub fn train_model() {
-//     loop {
-//         break;
-//     }
-// }
+fn read_word_index(fi: &mut FileTokenIterator, vocab: &Vocabulary) -> Option<i32> {
+    fi.read_token().map(|t| vocab.search_word(&t))
+}
+
+const MAX_SENTENCE_LENGTH: usize = 1024;
+
+pub fn train_model_thread(
+    training_file: &str,
+    vocab: &Vocabulary,
+    net: &mut NeuralNet,
+    thread_id: usize,
+    num_threads: usize,
+    file_size: u64,
+) -> Result<(), std::io::Error> {
+    let offset = file_size / num_threads as u64 * thread_id as u64;
+    let mut fi = FileTokenIterator::new(training_file, offset)?;
+    let mut eof_reached: bool = false;
+
+    let mut neu1: Vec<f32> = Vec::with_capacity(net.layer1_size);
+    neu1.resize(net.layer1_size, 0.0);
+    let mut neu1e: Vec<f32> = Vec::with_capacity(net.layer1_size);
+    neu1e.resize(net.layer1_size, 0.0);
+
+    let mut rand_gen = LcRandomGen::new(thread_id as i64);
+    let mut word_count: u64 = 0;
+
+    let mut sentence = [-1; MAX_SENTENCE_LENGTH + 1];
+    let mut sentence_length: usize = 0;
+    let mut sentence_position: usize = 0;
+
+    // these must be training parameters
+    let window: usize = 5; // the train window parameter
+    let mut local_iter = 1000; //5; // training epochs
+    let negative_samples = 3; // number of negative samples
+    let mut alpha: f32 = 0.025;
+
+    'thread_loop: loop {
+        // Retrieve the next sentence from the training set and store it in `sentence`
+        if sentence_length == 0 {
+            loop {
+                let idx = match read_word_index(&mut fi, vocab) {
+                    Some(-1) => continue,
+                    Some(x) => x,
+                    None => {
+                        eof_reached = true;
+                        break;
+                    }
+                };
+
+                word_count += 1;
+
+                // word 0 is the special token "</s>" which indicates the end of a sentence
+                if idx == 0 {
+                    break;
+                }
+
+                sentence[sentence_length] = idx;
+                sentence_length += 1;
+                if sentence_length > MAX_SENTENCE_LENGTH {
+                    break;
+                }
+                sentence_position = 0;
+            }
+            // print!("new sentence: ");
+            // for i in 0..sentence_length {
+            //     print!("{} ", sentence[i]);
+            // }
+            // println!();
+        }
+
+        if (sentence_length == 0 && eof_reached)
+            || (word_count > vocab.train_words() / num_threads as u64)
+        {
+            local_iter -= 1;
+            if local_iter == 0 {
+                break 'thread_loop;
+            }
+            word_count = 0;
+            sentence_length = 0;
+            // alpha *= 0.75;
+            fi.reset(offset)?;
+            eof_reached = false;
+            continue 'thread_loop;
+        }
+
+        let word = sentence[sentence_position];
+        if word == -1 {
+            assert!(false); // todo: check if this if condition is needed
+            continue;
+        }
+
+        neu1.fill(0.0);
+        neu1e.fill(0.0);
+        // `cw` stores the context word count
+        let mut cw = 0;
+
+        for a in 0..window * 2 + 1 {
+            if a == window {
+                continue;
+            }
+            let c: isize = sentence_position as isize - window as isize + a as isize;
+            if c < 0 || c >= sentence_length as isize {
+                continue;
+            }
+
+            let last_word = sentence[c as usize];
+            assert!(last_word != -1);
+
+            // sum all the context word vectors and store the result in neu1
+            let net_word_index = last_word as usize * net.layer1_size;
+            let word_vec = &net.syn0[net_word_index..net_word_index + net.layer1_size];
+            for i in 0..neu1.len() {
+                neu1[i] += word_vec[i];
+            }
+            cw += 1;
+        }
+
+        // if there were any context words
+        if cw > 0 {
+            // `neu1` is the sum of the context word vectors, and now
+            // becomes their average.
+            for i in 0..neu1.len() {
+                neu1[i] /= cw as f32;
+            }
+            // NEGATIVE SAMPLING
+            // Rather than performing backpropagation for every word in our
+            // vocabulary, we only perform it for the positive sample and a few
+            // negative samples (the number of words is given by 'negative').
+            // These negative words are selected using a "unigram" distribution,
+            // which is generated in the function InitUnigramTable.
+            for d in 0..negative_samples + 1 {
+                let target: i32;
+                let label: f32;
+
+                if d == 0 {
+                    // On the first iteration, we're going to train the positive sample.
+                    target = word;
+                    label = 1.0;
+                } else {
+                    // On the other iterations, we'll train the negative samples.
+                    // Pick a random word to use as a 'negative sample'; do this using
+                    // the unigram table.
+                    target = vocab.sample_random_word(rand_gen.next_rand());
+                    // Don't use the positive sample as a negative sample!
+                    if target == word {
+                        continue;
+                    }
+
+                    if sentence[0..sentence_length].contains(&target) {
+                        continue;
+                    }
+
+                    // Mark this as a negative example.
+                    label = 0.0;
+                }
+                // At this point, target might either be the positive sample or a
+                // negative sample, depending on the value of `label`.
+
+                // Get the index of the target word in the output layer.
+                let l2 = target as usize * net.layer1_size;
+                // Calculate the dot product between:
+                //   neu1 - The average of the context word vectors.
+                //   syn1neg[l2] - The output weights for the target word.
+                let mut f = 0.0;
+                for c in 0..net.layer1_size {
+                    f += neu1[c] * net.syn1neg[l2 + c];
+                }
+
+                // This block does two things:
+                //   1. Calculates the output of the network for this training
+                //      pair, using the expTable to evaluate the output layer
+                //      activation function.
+                //   2. Calculate the error at the output, stored in 'g', by
+                //      subtracting the network output from the desired output,
+                //      and finally multiply this by the learning rate.
+
+                // activation function: 1 / 1 + e^(-x) = e^x / e^x + 1
+                let expx = f64::exp(f as f64);
+                let output = expx / (expx + 1.0);
+                let err = (label - output as f32) * alpha;
+
+                // println!(
+                //     "iter: {:02} target: {target:02}, label: {label}, out: {output:.3}, err: {:.6}, l2: {l2}, dot: {f:.4}",
+                //     100 - local_iter, (label - output as f32)
+                // );
+                // println!("{},{:.6}", 1000 - local_iter, (label - output as f32));
+
+                // Multiply the error by the output layer weights.
+                // (I think this is the gradient calculation?)
+                // Accumulate these gradients over all of the negative samples.
+                for i in 0..net.layer1_size {
+                    neu1e[i] += err * net.syn1neg[l2 + i];
+                }
+
+                // Update the output layer weights by multiplying the output error
+                // by the average of the context word vectors.
+                for i in 0..net.layer1_size {
+                    net.syn1neg[l2 + i] += err * neu1[i];
+                }
+
+                // hidden -> in
+                // Backpropagate the error to the hidden layer (the word vectors).
+                // This code is used both for heirarchical softmax and for negative
+                // sampling.
+                //
+                // Loop over the positions in the context window (skipping the word at
+                // the center). 'a' is just the offset within the window, it's not
+                // the index relative to the beginning of the sentence.
+                for a in 0..window * 2 + 1 {
+                    if a == window {
+                        continue;
+                    }
+                    // Convert the window offset 'a' into an index 'c' into the sentence
+                    // array.
+                    let c: isize = sentence_position as isize - window as isize + a as isize;
+
+                    // Verify c isn't outisde the bounds of the sentence.
+                    if c < 0 || c >= sentence_length as isize {
+                        continue;
+                    }
+
+                    // Get the context word. That is, get the id of the word (its index in
+                    // the vocab table).
+                    let last_word = sentence[c as usize];
+                    assert!(last_word != -1);
+
+                    // Add the gradient in the vector `neu1e` to the word vector for
+                    // the current context word.
+                    // syn0[last_word * layer1_size] <-- Accesses the word vector.
+                    // for (c = 0; c < layer1_size; c++) syn0[c + last_word * layer1_size] += neu1e[c];
+                    for i in 0..net.layer1_size {
+                        net.syn0[last_word as usize * net.layer1_size + i] += neu1e[i];
+                    }
+                }
+            }
+        }
+
+        // Advance to the next word in the sentence.
+        sentence_position += 1;
+
+        // Check if we've reached the end of the sentence. If so, set sentence_length
+        // to 0 and we'll read a new sentence at the beginning of this loop.
+        if sentence_position >= sentence_length {
+            sentence_length = 0;
+            continue;
+        }
+    }
+
+    Ok(())
+}

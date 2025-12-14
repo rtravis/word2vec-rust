@@ -14,7 +14,7 @@ const UNIGRAM_TABLE_SIZE: usize = 100_000_000;
 pub struct Vocabulary {
     words: Vec<WordInfo>,
     hash_table: Vec<i32>,
-    added_words: u64,
+    train_words: u64,
     min_reduce: u32,
     unigram_table: Vec<i32>,
 }
@@ -74,15 +74,32 @@ impl Vocabulary {
         }
     }
 
-    pub fn size(&self) -> usize {
+    pub fn len(&self) -> usize {
         self.words.len()
+    }
+
+    pub fn train_words(&self) -> u64 {
+        self.train_words
+    }
+
+    // Pick a random word to use as a 'negative sample'; do this using
+    // the unigram table.
+    pub fn sample_random_word(&self, rand_seed: i64) -> i32 {
+        let idx = (rand_seed >> 16) as usize % self.unigram_table.len();
+        let mut target = self.unigram_table[idx];
+        // If the target is the special end of sentence token, then just
+        // pick a random word from the vocabulary instead.
+        if target == 0 {
+            target = (rand_seed as usize % (self.words.len() - 1) + 1) as i32;
+        }
+        target
     }
 
     fn new() -> Self {
         let mut vocab = Vocabulary {
             words: Vec::new(),
             hash_table: Vec::with_capacity(VOCAB_HASH_TABLE_SIZE as usize),
-            added_words: 0,
+            train_words: 0,
             min_reduce: 1,
             unigram_table: Vec::new(),
         };
@@ -112,7 +129,7 @@ impl Vocabulary {
         } else {
             self.words[widx as usize].count += 1;
         }
-        self.added_words += 1;
+        self.train_words += 1;
 
         if self.words.len() as f64 > (0.7 * VOCAB_HASH_TABLE_SIZE as f64) {
             self.reduce_vocab();
@@ -122,7 +139,7 @@ impl Vocabulary {
 
     fn rebuild_hashtable(&mut self) {
         self.hash_table.fill(-1);
-        self.added_words = 0;
+        self.train_words = 0;
 
         for (widx, w) in self.words.iter().enumerate() {
             let mut hidx = get_word_hash_index(&w.word);
@@ -130,7 +147,7 @@ impl Vocabulary {
                 hidx = (hidx + 1) % (VOCAB_HASH_TABLE_SIZE as usize);
             }
             self.hash_table[hidx] = widx as i32;
-            self.added_words += w.count as u64;
+            self.train_words += w.count as u64;
         }
     }
 

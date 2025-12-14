@@ -16,6 +16,9 @@ pub fn read_file_by_tokens<T: FnMut(&[u8])>(
     loop {
         let data: &[u8] = buf_reader.fill_buf()?;
         if data.is_empty() {
+            if !rest.is_empty() {
+                token_callback(&rest);
+            }
             break;
         }
 
@@ -101,6 +104,15 @@ impl FileTokenIterator {
         result.file.seek(SeekFrom::Start(offset))?;
 
         Ok(result)
+    }
+
+    pub fn reset(&mut self, offset: u64) -> std::io::Result<()> {
+        self.file.seek(SeekFrom::Start(offset))?;
+        self.start_pos = 0;
+        self.end_pos = 0;
+        self.rest.clear();
+        self.output_separator = false;
+        Ok(())
     }
 
     pub fn read_token(&mut self) -> Option<String> {
