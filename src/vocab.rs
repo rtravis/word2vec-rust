@@ -26,7 +26,7 @@ fn get_word_hash_index(word: &str) -> usize {
 }
 
 impl Vocabulary {
-    pub fn learn_vocabulary_from_training_file(file_name: &str) -> Vocabulary {
+    pub fn learn_vocabulary_from_training_file(file_name: &str, min_count: u32) -> Vocabulary {
         let mut vocab = Vocabulary::new();
         let mut word_callback = |word: &[u8]| {
             let word_str =
@@ -38,7 +38,7 @@ impl Vocabulary {
         // expected by other functions
         word_callback(b"</s>");
         let _ = read_file_by_tokens(file_name, word_callback);
-        vocab.sort_vocab(1);
+        vocab.sort_vocab(min_count);
 
         init_unigram_table(&mut vocab);
 
@@ -76,6 +76,11 @@ impl Vocabulary {
 
     pub fn len(&self) -> usize {
         self.words.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 
     pub fn train_words(&self) -> u64 {
@@ -133,6 +138,8 @@ impl Vocabulary {
 
         if self.words.len() as f64 > (0.7 * VOCAB_HASH_TABLE_SIZE as f64) {
             self.reduce_vocab();
+            // widx is no longer valid at this point, set it to -1
+            widx = -1;
         }
         widx
     }

@@ -7,7 +7,7 @@ use crate::tokenizer::FileTokenIterator;
 use crate::vocab::Vocabulary;
 
 pub struct NeuralNet {
-    vocab_size: usize,
+    // vocab_size: usize,
     layer1_size: usize,
     syn0: Vec<f32>,
     syn1neg: Vec<f32>,
@@ -31,7 +31,7 @@ impl NeuralNet {
     pub fn new(vocab_size: usize, layer1_size: usize) -> NeuralNet {
         let size = vocab_size * layer1_size;
         let mut net = NeuralNet {
-            vocab_size,
+            // vocab_size,
             layer1_size,
             syn0: Vec::with_capacity(size),
             syn1neg: Vec::with_capacity(size),
@@ -48,6 +48,13 @@ impl NeuralNet {
 
 fn read_word_index(fi: &mut FileTokenIterator, vocab: &Vocabulary) -> Option<i32> {
     fi.read_token().map(|t| vocab.search_word(&t))
+}
+
+fn dot_product(vec1: &[f32], vec2: &[f32]) -> f32 {
+    assert!(vec1.len() == vec2.len());
+    vec1.iter()
+        .zip(vec2)
+        .fold(0.0, |acc, cur| acc + cur.0 * cur.1)
 }
 
 const MAX_SENTENCE_LENGTH: usize = 1024;
@@ -78,9 +85,9 @@ pub fn train_model_thread(
 
     // these must be training parameters
     let window: usize = 5; // the train window parameter
-    let mut local_iter = 1000; //5; // training epochs
+    let mut local_iter = 15; // training epochs
     let negative_samples = 3; // number of negative samples
-    let mut alpha: f32 = 0.025;
+    let alpha: f32 = 0.025;
 
     'thread_loop: loop {
         // Retrieve the next sentence from the training set and store it in `sentence`
@@ -133,8 +140,8 @@ pub fn train_model_thread(
 
         let word = sentence[sentence_position];
         if word == -1 {
-            assert!(false); // todo: check if this if condition is needed
-            continue;
+            // continue; // todo: check if this if condition is needed
+            unreachable!();
         }
 
         neu1.fill(0.0);
@@ -167,8 +174,8 @@ pub fn train_model_thread(
         if cw > 0 {
             // `neu1` is the sum of the context word vectors, and now
             // becomes their average.
-            for i in 0..neu1.len() {
-                neu1[i] /= cw as f32;
+            for n in &mut neu1 {
+                *n /= cw as f32;
             }
             // NEGATIVE SAMPLING
             // Rather than performing backpropagation for every word in our
@@ -209,10 +216,7 @@ pub fn train_model_thread(
                 // Calculate the dot product between:
                 //   neu1 - The average of the context word vectors.
                 //   syn1neg[l2] - The output weights for the target word.
-                let mut f = 0.0;
-                for c in 0..net.layer1_size {
-                    f += neu1[c] * net.syn1neg[l2 + c];
-                }
+                let f: f32 = dot_product(&neu1, &net.syn1neg[l2..l2 + net.layer1_size]);
 
                 // This block does two things:
                 //   1. Calculates the output of the network for this training
