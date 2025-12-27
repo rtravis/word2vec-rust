@@ -1,7 +1,8 @@
 use super::tokenizer::read_file_by_tokens;
+use core::str;
 use std::fs::File;
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::io::{BufWriter, Write};
+use std::io::{BufRead, BufReader, BufWriter, Error, Write};
 
 struct WordInfo {
     word: String,
@@ -11,6 +12,12 @@ struct WordInfo {
 const VOCAB_HASH_TABLE_SIZE: i32 = 30_000_000;
 const UNIGRAM_TABLE_SIZE: usize = 100_000_000;
 
+fn get_word_hash_index(word: &str) -> usize {
+    let mut hasher = DefaultHasher::new();
+    word.hash(&mut hasher);
+    (hasher.finish() % VOCAB_HASH_TABLE_SIZE as u64) as usize
+}
+
 pub struct Vocabulary {
     words: Vec<WordInfo>,
     hash_table: Vec<i32>,
@@ -19,14 +26,11 @@ pub struct Vocabulary {
     unigram_table: Vec<i32>,
 }
 
-fn get_word_hash_index(word: &str) -> usize {
-    let mut hasher = DefaultHasher::new();
-    word.hash(&mut hasher);
-    (hasher.finish() % VOCAB_HASH_TABLE_SIZE as u64) as usize
-}
-
 impl Vocabulary {
-    pub fn learn_vocabulary_from_training_file(file_name: &str, min_count: u32) -> Vocabulary {
+    pub fn learn_vocabulary_from_training_file(
+        file_name: &str,
+        min_count: u32,
+    ) -> std::io::Result<Vocabulary> {
         let mut vocab = Vocabulary::new();
         let mut word_callback = |word: &[u8]| {
             let word_str =
@@ -37,15 +41,13 @@ impl Vocabulary {
         // ensure the document/sentence/line separator represented by "</s>" has index 0, as
         // expected by other functions
         word_callback(b"</s>");
-        let _ = read_file_by_tokens(file_name, word_callback);
+        read_file_by_tokens(file_name, word_callback)?;
         vocab.sort_vocab(min_count);
-
-        init_unigram_table(&mut vocab);
-
-        vocab
+        vocab.init_unigram_table();
+        Ok(vocab)
     }
 
-    pub fn save_vocab(&self, vocab_file: &str) -> std::io::Result<()> {
+    pub fn save_to_file(&self, vocab_file: &str) -> std::io::Result<()> {
         let mut buf_writer: BufWriter<File> = BufWriter::new(File::create(vocab_file)?);
         for w in self.words.iter() {
             writeln!(buf_writer, "{} {}", w.word, w.count)?;
@@ -53,13 +55,59 @@ impl Vocabulary {
         Ok(())
     }
 
-    pub fn print_vocab(&self) {
-        for (idx, w) in self.words.iter().enumerate() {
-            print!("{} {}, ", idx, w.word);
+    pub fn load_from_file(vocab_file: &str) -> std::io::Result<Vocabulary> {
+        let mut buf_reader = BufReader::new(File::open(vocab_file)?);
+        let mut vocab = Vocabulary::new();
+
+        let mut line_buf: Vec<u8> = vec![];
+        loop {
+            line_buf.clear();
+            let res = buf_reader.read_until(b'\n', &mut line_buf);
+            let p = match res {
+                Ok(0) => break,
+                Ok(_size) => {
+                    let mut parts = line_buf.split(|b| b.is_ascii_whitespace());
+                    let (Some(p1), Some(p2)) = (parts.next(), parts.next()) else {
+                        break;
+                    };
+                    (str::from_utf8(p1), str::from_utf8(p2))
+                }
+                Err(e) => return Err(e),
+            };
+
+            let (Ok(word), Ok(count)) = p else {
+                return Err(Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "Encountered invalid line",
+                ));
+            };
+
+            let Ok(count): Result<u32, _> = count.parse() else {
+                return Err(Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "Count is not a positive integer",
+                ));
+            };
+
+            if word.is_empty() {
+                return Err(Error::new(std::io::ErrorKind::InvalidData, "Word is empty"));
+            }
+
+            vocab.add_word_with_count(word.to_string(), count);
         }
-        println!();
+
+        if vocab.is_empty() {
+            return Err(Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Empty vocabulary",
+            ));
+        }
+
+        vocab.init_unigram_table();
+        Ok(vocab)
     }
 
+    /// return word index (or word ID), -1 is returned if not found
     pub fn search_word(&self, word: &str) -> i32 {
         let mut hidx = get_word_hash_index(word);
         loop {
@@ -112,36 +160,63 @@ impl Vocabulary {
         vocab
     }
 
-    fn add_word(&mut self, word: String) -> i32 {
-        let mut hidx = get_word_hash_index(&word);
-        let mut widx: i32 = -1;
+    /// return a pair: (hashtable_index, word_array_index), where
+    /// hashtable_index is the hashtable index for an existing word or the hashtable
+    /// insertion index for a new word
+    /// word_array_index the index in the word array for an existing word or -1 for
+    /// a new word
+    fn get_word_indices(&self, word: &str) -> (usize, i32) {
+        // index in the hashtable
+        let mut hash_idx = get_word_hash_index(word);
+        // index in the words array
+        let mut word_idx: i32 = -1;
         loop {
-            if self.hash_table[hidx] == -1 {
+            if self.hash_table[hash_idx] == -1 {
                 break;
             }
-            let wi = self.hash_table[hidx];
+            let wi = self.hash_table[hash_idx];
             if self.words[wi as usize].word == word {
-                widx = wi;
+                word_idx = wi;
                 break;
             }
-            hidx = (hidx + 1) % (VOCAB_HASH_TABLE_SIZE as usize);
+            hash_idx = (hash_idx + 1) % (VOCAB_HASH_TABLE_SIZE as usize);
         }
+        (hash_idx, word_idx)
+    }
 
-        if widx == -1 {
-            widx = self.words.len() as i32;
+    fn add_word(&mut self, word: String) -> i32 {
+        let (hash_idx, mut word_idx) = self.get_word_indices(&word);
+
+        if word_idx == -1 {
+            word_idx = self.words.len() as i32;
             self.words.push(WordInfo { word, count: 1 });
-            self.hash_table[hidx] = widx;
+            self.hash_table[hash_idx] = word_idx;
         } else {
-            self.words[widx as usize].count += 1;
+            self.words[word_idx as usize].count += 1;
         }
         self.train_words += 1;
 
         if self.words.len() as f64 > (0.7 * VOCAB_HASH_TABLE_SIZE as f64) {
             self.reduce_vocab();
-            // widx is no longer valid at this point, set it to -1
-            widx = -1;
+            // word_idx is no longer valid at this point, set it to -1
+            word_idx = -1;
         }
-        widx
+        word_idx
+    }
+
+    fn add_word_with_count(&mut self, word: String, count: u32) -> i32 {
+        let (hash_idx, mut word_idx) = self.get_word_indices(&word);
+        assert!(word_idx == -1);
+
+        if word_idx == -1 {
+            word_idx = self.words.len() as i32;
+            self.words.push(WordInfo { word, count });
+            self.hash_table[hash_idx] = word_idx;
+        } else {
+            self.words[word_idx as usize].count += count;
+        }
+        self.train_words += count as u64;
+        word_idx
     }
 
     fn rebuild_hashtable(&mut self) {
@@ -192,28 +267,30 @@ impl Vocabulary {
         self.words.truncate(idx);
         self.rebuild_hashtable();
     }
-}
 
-fn init_unigram_table(vocab: &mut Vocabulary) {
-    // initialize the unigram table according to the word count distribution
-    const WORD_POWER: f64 = 0.75;
-    let train_words_pow: f64 = vocab.words.iter().fold(0.0f64, |acc, word| {
-        acc + f64::powf(word.count as f64, WORD_POWER)
-    });
+    fn init_unigram_table(&mut self) {
+        assert!(!self.words.is_empty());
 
-    let mut frac: f64 = f64::powf(vocab.words[0].count as f64, WORD_POWER) / train_words_pow;
+        // initialize the unigram table according to the word count distribution
+        const WORD_POWER: f64 = 0.75;
+        let train_words_pow: f64 = self.words.iter().fold(0.0f64, |acc, word| {
+            acc + f64::powf(word.count as f64, WORD_POWER)
+        });
 
-    vocab.unigram_table.reserve(UNIGRAM_TABLE_SIZE);
-    unsafe {
-        vocab.unigram_table.set_len(UNIGRAM_TABLE_SIZE);
-    }
+        let mut frac: f64 = f64::powf(self.words[0].count as f64, WORD_POWER) / train_words_pow;
 
-    let mut word_idx: usize = 0;
-    for (idx, tab_val) in vocab.unigram_table.iter_mut().enumerate() {
-        *tab_val = word_idx as i32;
-        if (idx as f64 / UNIGRAM_TABLE_SIZE as f64) > frac {
-            word_idx += 1;
-            frac += f64::powf(vocab.words[word_idx].count as f64, WORD_POWER) / train_words_pow;
+        self.unigram_table.reserve(UNIGRAM_TABLE_SIZE);
+        unsafe {
+            self.unigram_table.set_len(UNIGRAM_TABLE_SIZE);
+        }
+
+        let mut word_idx: usize = 0;
+        for (idx, tab_val) in self.unigram_table.iter_mut().enumerate() {
+            *tab_val = word_idx as i32;
+            if (idx as f64 / UNIGRAM_TABLE_SIZE as f64) > frac {
+                word_idx += 1;
+                frac += f64::powf(self.words[word_idx].count as f64, WORD_POWER) / train_words_pow;
+            }
         }
     }
 }
