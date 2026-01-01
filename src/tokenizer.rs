@@ -195,7 +195,10 @@ impl FileTokenIterator {
                 self.rest.clear();
                 break 'readloop output;
             }
-            break 'readloop output;
+
+            // set start_pos == end_pos to force reading in the next iteration
+            self.start_pos = token_end;
+            self.end_pos = token_end;
         }
     }
 }
