@@ -55,6 +55,11 @@ impl Vocabulary {
         Ok(())
     }
 
+    pub fn debug_print_summary(&self) {
+        println!("Vocab size: {}", self.words.len());
+        println!("Words in train file: {}", self.train_words);
+    }
+
     pub fn load_from_file(vocab_file: &str) -> std::io::Result<Vocabulary> {
         let mut buf_reader = BufReader::new(File::open(vocab_file)?);
         let mut vocab = Vocabulary::new();
@@ -292,5 +297,30 @@ impl Vocabulary {
                 frac += f64::powf(self.words[word_idx].count as f64, WORD_POWER) / train_words_pow;
             }
         }
+    }
+}
+
+pub struct VocabularyIter<'a> {
+    vocab: &'a Vocabulary,
+    i: usize,
+}
+
+impl<'a> Iterator for VocabularyIter<'a> {
+    type Item = &'a str;
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.i >= self.vocab.words.len() {
+            None
+        } else {
+            self.i += 1;
+            Some(&self.vocab.words[self.i - 1].word)
+        }
+    }
+}
+
+impl<'a> IntoIterator for &'a Vocabulary {
+    type Item = &'a str;
+    type IntoIter = VocabularyIter<'a>;
+    fn into_iter(self) -> Self::IntoIter {
+        VocabularyIter { vocab: self, i: 0 }
     }
 }
