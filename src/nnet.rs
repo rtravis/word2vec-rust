@@ -1,13 +1,12 @@
-// #![allow(dead_code)]
-// #![allow(unused_variables)]
-// #![allow(unused_mut)]
+use std::fs::File;
+use std::io::{BufWriter, Write};
+use std::time::Instant;
 
-// use std::fmt::Error;
 use crate::tokenizer::FileTokenIterator;
 use crate::vocab::Vocabulary;
 
 pub struct NeuralNet {
-    // vocab_size: usize,
+    vocab_size: usize,
     layer1_size: usize,
     syn0: Vec<f32>,
     syn1neg: Vec<f32>,
@@ -31,7 +30,7 @@ impl NeuralNet {
     pub fn new(vocab_size: usize, layer1_size: usize) -> NeuralNet {
         let size = vocab_size * layer1_size;
         let mut net = NeuralNet {
-            // vocab_size,
+            vocab_size,
             layer1_size,
             syn0: Vec::with_capacity(size),
             syn1neg: Vec::with_capacity(size),
@@ -44,12 +43,44 @@ impl NeuralNet {
         net.syn1neg.resize(size, 0.0);
         net
     }
+
+    pub fn save(
+        &self,
+        vocab: &Vocabulary,
+        output_file_name: &str,
+        binary: bool,
+    ) -> Result<(), std::io::Error> {
+        let mut buf_writer: BufWriter<File> = BufWriter::new(File::create(output_file_name)?);
+        writeln!(buf_writer, "{} {}", self.vocab_size, self.layer1_size)?;
+        for (idx, word) in vocab.into_iter().enumerate() {
+            write!(buf_writer, "{word} ")?;
+            let word_vec = &self.syn0[idx * self.layer1_size..(idx + 1) * self.layer1_size];
+            if binary {
+                unsafe {
+                    let data = std::slice::from_raw_parts(
+                        word_vec.as_ptr() as *const u8,
+                        word_vec.len() * std::mem::size_of_val(&word_vec[0]),
+                    );
+                    buf_writer.write_all(data)?;
+                }
+            } else {
+                for f in word_vec {
+                    write!(buf_writer, "{f:.06} ")?;
+                }
+            }
+            writeln!(buf_writer)?;
+        }
+
+        Ok(())
+    }
 }
 
+/// @return None on EOF, Some(-1) if token is not in the vocabulary, Some(token_index) otherwise
 fn read_word_index(fi: &mut FileTokenIterator, vocab: &Vocabulary) -> Option<i32> {
     fi.read_token().map(|t| vocab.search_word(&t))
 }
 
+/// @return the dot product of 2 f32 vectors
 fn dot_product(vec1: &[f32], vec2: &[f32]) -> f32 {
     assert!(vec1.len() == vec2.len());
     vec1.iter()
@@ -59,10 +90,11 @@ fn dot_product(vec1: &[f32], vec2: &[f32]) -> f32 {
 
 const MAX_SENTENCE_LENGTH: usize = 1024;
 
+/// train the word2vec neural net `net` with training data found in `training_file`
 pub fn train_model_thread(
+    net: &mut NeuralNet,
     training_file: &str,
     vocab: &Vocabulary,
-    net: &mut NeuralNet,
     thread_id: usize,
     num_threads: usize,
     file_size: u64,
@@ -77,7 +109,11 @@ pub fn train_model_thread(
     neu1e.resize(net.layer1_size, 0.0);
 
     let mut rand_gen = LcRandomGen::new(thread_id as i64);
+    // progress tracking
     let mut word_count: u64 = 0;
+    let mut word_count_actual: u64 = 0;
+    let mut last_word_count: u64 = 0;
+    let start: Instant = Instant::now();
 
     let mut sentence = [-1; MAX_SENTENCE_LENGTH + 1];
     let mut sentence_length: usize = 0;
@@ -85,11 +121,42 @@ pub fn train_model_thread(
 
     // these must be training parameters
     let window: usize = 5; // the train window parameter
-    let mut local_iter = 15; // training epochs
+    let total_iter = 1;
+    let mut local_iter = total_iter; // training epochs
     let negative_samples = 3; // number of negative samples
-    let alpha: f32 = 0.025;
+    let starting_alpha = 0.025;
+    let mut alpha: f32 = starting_alpha;
 
     'thread_loop: loop {
+        // This block prints a progress update, and also adjusts the training
+        // 'alpha' parameter.
+        if word_count - last_word_count > 10000 {
+            word_count_actual += word_count - last_word_count;
+            last_word_count = word_count;
+
+            // The percentage complete is based on the total number of passes we are
+            // doing and not just the current pass.
+            // if ((debug_mode > 1)) {
+            print!(
+                "\rAlpha: {alpha:.06} Progress: {:.02}%  Words/thread/sec: {:.02}k ",
+                word_count_actual as f64 / (total_iter * vocab.train_words() + 1) as f64 * 100_f64,
+                (word_count_actual as f64 / 1000_f64) / start.elapsed().as_secs_f64()
+            );
+
+            std::io::stdout().flush().unwrap_or_default();
+
+            // Update alpha to: [initial alpha] * [percent of training remaining]
+            // This means that alpha will gradually decrease as we progress through
+            // the training text.
+            alpha = starting_alpha
+                * (1_f32
+                    - word_count_actual as f32 / (total_iter * vocab.train_words() + 1) as f32);
+            // Don't let alpha go below [initial alpha] * 0.0001.
+            if alpha < starting_alpha * 0.0001 {
+                alpha = starting_alpha * 0.0001;
+            }
+        }
+
         // Retrieve the next sentence from the training set and store it in `sentence`
         if sentence_length == 0 {
             loop {
@@ -116,11 +183,15 @@ pub fn train_model_thread(
                 }
                 sentence_position = 0;
             }
-            // print!("new sentence: ");
-            // for i in 0..sentence_length {
-            //     print!("{} ", sentence[i]);
+
+            // if sentence_length != 0 {
+            //     print!("{local_iter:02} new sentence: ");
+            //     for i in 0..sentence_length {
+            //         print!("{} ", sentence[i]);
+            //     }
+            //     println!();
+            //     print!("")
             // }
-            // println!();
         }
 
         if (sentence_length == 0 && eof_reached)
@@ -145,11 +216,11 @@ pub fn train_model_thread(
         }
 
         neu1.fill(0.0);
-        neu1e.fill(0.0);
         // `cw` stores the context word count
         let mut cw = 0;
+        let b = rand_gen.next_rand() as usize % window;
 
-        for a in 0..window * 2 + 1 {
+        for a in b..window * 2 + 1 - b {
             if a == window {
                 continue;
             }
@@ -172,6 +243,8 @@ pub fn train_model_thread(
 
         // if there were any context words
         if cw > 0 {
+            // neu1e is used in this block only
+            neu1e.fill(0.0);
             // `neu1` is the sum of the context word vectors, and now
             // becomes their average.
             for n in &mut neu1 {
@@ -201,9 +274,9 @@ pub fn train_model_thread(
                         continue;
                     }
 
-                    if sentence[0..sentence_length].contains(&target) {
-                        continue;
-                    }
+                    // if sentence[0..sentence_length].contains(&target) {
+                    //     continue;
+                    // }
 
                     // Mark this as a negative example.
                     label = 0.0;
@@ -226,16 +299,18 @@ pub fn train_model_thread(
                 //      subtracting the network output from the desired output,
                 //      and finally multiply this by the learning rate.
 
-                // activation function: 1 / 1 + e^(-x) = e^x / e^x + 1
+                // activation function: 1 / (1 + e^(-x)) = e^x / (e^x + 1)
                 let expx = f64::exp(f as f64);
                 let output = expx / (expx + 1.0);
                 let err = (label - output as f32) * alpha;
 
-                // println!(
-                //     "iter: {:02} target: {target:02}, label: {label}, out: {output:.3}, err: {:.6}, l2: {l2}, dot: {f:.4}",
-                //     100 - local_iter, (label - output as f32)
-                // );
-                // println!("{},{:.6}", 1000 - local_iter, (label - output as f32));
+                // if label == 1.0 {
+                //     println!(
+                //         "iter: {:02} target: {target:02}, label: {label}, out: {output:.3}, err: {:.6}, l2: {l2}, dot: {f:.4}",
+                //         local_iter,
+                //         (label - output as f32)
+                //     );
+                // }
 
                 // Multiply the error by the output layer weights.
                 // (I think this is the gradient calculation?)
@@ -249,40 +324,40 @@ pub fn train_model_thread(
                 for i in 0..net.layer1_size {
                     net.syn1neg[l2 + i] += err * neu1[i];
                 }
+            }
 
-                // hidden -> in
-                // Backpropagate the error to the hidden layer (the word vectors).
-                // This code is used both for heirarchical softmax and for negative
-                // sampling.
-                //
-                // Loop over the positions in the context window (skipping the word at
-                // the center). 'a' is just the offset within the window, it's not
-                // the index relative to the beginning of the sentence.
-                for a in 0..window * 2 + 1 {
-                    if a == window {
-                        continue;
-                    }
-                    // Convert the window offset 'a' into an index 'c' into the sentence
-                    // array.
-                    let c: isize = sentence_position as isize - window as isize + a as isize;
+            // hidden -> in
+            // Backpropagate the error to the hidden layer (the word vectors).
+            // This code is used both for heirarchical softmax and for negative
+            // sampling.
+            //
+            // Loop over the positions in the context window (skipping the word at
+            // the center). 'a' is just the offset within the window, it's not
+            // the index relative to the beginning of the sentence.
+            for a in b..window * 2 + 1 - b {
+                if a == window {
+                    continue;
+                }
+                // Convert the window offset 'a' into an index 'c' into the sentence
+                // array.
+                let c: isize = sentence_position as isize - window as isize + a as isize;
 
-                    // Verify c isn't outisde the bounds of the sentence.
-                    if c < 0 || c >= sentence_length as isize {
-                        continue;
-                    }
+                // Verify c isn't outisde the bounds of the sentence.
+                if c < 0 || c >= sentence_length as isize {
+                    continue;
+                }
 
-                    // Get the context word. That is, get the id of the word (its index in
-                    // the vocab table).
-                    let last_word = sentence[c as usize];
-                    assert!(last_word != -1);
+                // Get the context word. That is, get the id of the word (its index in
+                // the vocab table).
+                let last_word = sentence[c as usize];
+                assert!(last_word != -1);
 
-                    // Add the gradient in the vector `neu1e` to the word vector for
-                    // the current context word.
-                    // syn0[last_word * layer1_size] <-- Accesses the word vector.
-                    // for (c = 0; c < layer1_size; c++) syn0[c + last_word * layer1_size] += neu1e[c];
-                    for i in 0..net.layer1_size {
-                        net.syn0[last_word as usize * net.layer1_size + i] += neu1e[i];
-                    }
+                // Add the gradient in the vector `neu1e` to the word vector for
+                // the current context word.
+                // syn0[last_word * layer1_size] <-- Accesses the word vector.
+                // for (c = 0; c < layer1_size; c++) syn0[c + last_word * layer1_size] += neu1e[c];
+                for i in 0..net.layer1_size {
+                    net.syn0[last_word as usize * net.layer1_size + i] += neu1e[i];
                 }
             }
         }
