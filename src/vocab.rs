@@ -141,9 +141,9 @@ impl Vocabulary {
     }
 
     // Pick a random word to use as a 'negative sample'; do this using
-    // the unigram table.
+    // the unigram table.d.bin"
     pub fn sample_random_word(&self, rand_seed: i64) -> i32 {
-        let idx = (rand_seed >> 16) as usize % self.unigram_table.len();
+        let idx = (rand_seed as usize >> 16) % self.unigram_table.len();
         let mut target = self.unigram_table[idx];
         // If the target is the special end of sentence token, then just
         // pick a random word from the vocabulary instead.
