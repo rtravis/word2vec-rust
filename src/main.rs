@@ -1,6 +1,7 @@
 use std::fs::metadata;
+use std::sync::atomic::AtomicU64;
 
-use w2v_rs::nnet::{NeuralNet, train_model_thread};
+use w2v_rs::nnet::{NeuralNet, TrainigParams, TrainigProgress, train_model_thread};
 use w2v_rs::vocab::Vocabulary;
 
 fn train(
@@ -10,7 +11,7 @@ fn train(
     save_vocab_file: &str,
     debug_mode: i32,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let file_size = metadata(training_file)?.len();
+    let training_file_size = metadata(training_file)?.len();
     let vocab: Vocabulary;
     if vocab_file.is_empty() {
         vocab = Vocabulary::learn_vocabulary_from_training_file(training_file, 2)?;
@@ -34,8 +35,23 @@ fn train(
         return Ok(());
     }
 
-    let mut net = NeuralNet::new(vocab.len(), 10);
-    train_model_thread(&mut net, training_file, &vocab, 0, 1, file_size)?;
+    let mut net = NeuralNet::new(vocab.len(), 100);
+    let params = TrainigParams {
+        training_file,
+        training_file_size,
+        num_threads: 1,
+        window: 5,
+        total_iter: 1,
+        negative_samples: 4,
+        starting_alpha: 0.025,
+        debug_mode,
+    };
+
+    let mut progress = TrainigProgress {
+        word_count_actual: AtomicU64::new(0),
+    };
+
+    train_model_thread(&mut net, &vocab, 0, &params, &mut progress)?;
     net.save(&vocab, &output_file, true)?;
     Ok(())
 }

@@ -1,5 +1,6 @@
 use std::fs::File;
 use std::io::{BufWriter, Write};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use crate::tokenizer::FileTokenIterator;
@@ -95,19 +96,35 @@ fn dot_product(vec1: &[f32], vec2: &[f32]) -> f32 {
 //         .for_each(|(src, dest)| *dest += a * src);
 // }
 
+pub struct TrainigParams<'a> {
+    pub training_file: &'a str,
+    pub training_file_size: u64,
+    pub num_threads: usize,    // the total number of training threads
+    pub window: usize,         // the train window parameter
+    pub total_iter: u64,       // number of training epochs
+    pub negative_samples: i32, // number of negative samples
+    pub starting_alpha: f32,   // the starting learning rate
+    pub debug_mode: i32,
+}
+
+pub struct TrainigProgress {
+    pub word_count_actual: AtomicU64,
+}
+
 const MAX_SENTENCE_LENGTH: usize = 1024;
 
 /// train the word2vec neural net `net` with training data found in `training_file`
 pub fn train_model_thread(
     net: &mut NeuralNet,
-    training_file: &str,
     vocab: &Vocabulary,
     thread_id: usize,
-    num_threads: usize,
-    file_size: u64,
+    params: &TrainigParams,
+    progress: &mut TrainigProgress,
 ) -> Result<(), std::io::Error> {
-    let offset = file_size / num_threads as u64 * thread_id as u64;
-    let mut fi = FileTokenIterator::new(training_file, offset)?;
+    assert!(net.vocab_size == vocab.len());
+
+    let offset = params.training_file_size / params.num_threads as u64 * thread_id as u64;
+    let mut fi = FileTokenIterator::new(params.training_file, offset)?;
     let mut eof_reached: bool = false;
 
     let mut neu1: Vec<f32> = Vec::with_capacity(net.layer1_size);
@@ -118,49 +135,47 @@ pub fn train_model_thread(
     let mut rand_gen = LcRandomGen::new(thread_id as i64);
     // progress tracking
     let mut word_count: u64 = 0;
-    let mut word_count_actual: u64 = 0;
     let mut last_word_count: u64 = 0;
     let start: Instant = Instant::now();
 
     let mut sentence = [-1; MAX_SENTENCE_LENGTH + 1];
     let mut sentence_length: usize = 0;
     let mut sentence_position: usize = 0;
-
-    // these must be training parameters
-    let window: usize = 5; // the train window parameter
-    let total_iter = 1;
-    let mut local_iter = total_iter; // training epochs
-    let negative_samples = 4; // number of negative samples
-    let starting_alpha = 0.025;
-    let mut alpha: f32 = starting_alpha;
+    let mut local_iter = params.total_iter;
+    let mut alpha: f32 = params.starting_alpha;
 
     'thread_loop: loop {
         // This block prints a progress update, and also adjusts the training
         // 'alpha' parameter.
         if word_count - last_word_count > 10000 {
-            word_count_actual += word_count - last_word_count;
+            progress
+                .word_count_actual
+                .fetch_add(word_count - last_word_count, Ordering::Relaxed);
             last_word_count = word_count;
+
+            let wc = progress.word_count_actual.load(Ordering::Relaxed) as f64;
 
             // The percentage complete is based on the total number of passes we are
             // doing and not just the current pass.
-            // if ((debug_mode > 1)) {
-            print!(
-                "\rAlpha: {alpha:.06} Progress: {:.02}%  Words/thread/sec: {:.02}k ",
-                word_count_actual as f64 / (total_iter * vocab.train_words() + 1) as f64 * 100_f64,
-                (word_count_actual as f64 / 1000_f64) / start.elapsed().as_secs_f64()
-            );
+            if params.debug_mode > 1 {
+                print!(
+                    "\rAlpha: {alpha:.06} Progress: {:.02}%  Words/thread/sec: {:.02}k ",
+                    wc / (params.total_iter * vocab.train_words() + 1) as f64 * 100_f64,
+                    (wc / 1000_f64) / start.elapsed().as_secs_f64()
+                );
+            }
 
             std::io::stdout().flush().unwrap_or_default();
 
             // Update alpha to: [initial alpha] * [percent of training remaining]
             // This means that alpha will gradually decrease as we progress through
             // the training text.
-            alpha = starting_alpha
-                * (1_f32
-                    - word_count_actual as f32 / (total_iter * vocab.train_words() + 1) as f32);
+            alpha = params.starting_alpha
+                * (1_f32 - wc as f32 / (params.total_iter * vocab.train_words() + 1) as f32);
+
             // Don't let alpha go below [initial alpha] * 0.0001.
-            if alpha < starting_alpha * 0.0001 {
-                alpha = starting_alpha * 0.0001;
+            if alpha < params.starting_alpha * 0.0001 {
+                alpha = params.starting_alpha * 0.0001;
             }
         }
 
@@ -190,19 +205,10 @@ pub fn train_model_thread(
                 }
                 sentence_position = 0;
             }
-
-            // if sentence_length != 0 {
-            //     print!("{local_iter:02} new sentence: ");
-            //     for i in 0..sentence_length {
-            //         print!("{} ", sentence[i]);
-            //     }
-            //     println!();
-            //     print!("")
-            // }
         }
 
         if (sentence_length == 0 && eof_reached)
-            || (word_count > vocab.train_words() / num_threads as u64)
+            || (word_count > vocab.train_words() / params.num_threads as u64)
         {
             local_iter -= 1;
             if local_iter == 0 {
@@ -219,20 +225,19 @@ pub fn train_model_thread(
 
         let word = sentence[sentence_position];
         if word == -1 {
-            // continue; // todo: check if this if condition is needed
-            unreachable!();
+            continue; // this condition is probably not needed
         }
 
         neu1.fill(0.0);
         // `cw` stores the context word count
         let mut cw = 0;
-        let b = rand_gen.next_rand() as usize % window;
+        let b = rand_gen.next_rand() as usize % params.window;
 
-        for a in b..window * 2 + 1 - b {
-            if a == window {
+        for a in b..params.window * 2 + 1 - b {
+            if a == params.window {
                 continue;
             }
-            let c: isize = sentence_position as isize - window as isize + a as isize;
+            let c: isize = sentence_position as isize - params.window as isize + a as isize;
             if c < 0 || c >= sentence_length as isize {
                 continue;
             }
@@ -264,7 +269,7 @@ pub fn train_model_thread(
             // negative samples (the number of words is given by 'negative').
             // These negative words are selected using a "unigram" distribution,
             // which is generated in the function InitUnigramTable.
-            for d in 0..negative_samples + 1 {
+            for d in 0..params.negative_samples + 1 {
                 let target: i32;
                 let label: f32;
 
@@ -319,14 +324,6 @@ pub fn train_model_thread(
                 let output = expx / (expx + 1.0);
                 let err = (label - output as f32) * alpha;
 
-                // if label == 1.0 {
-                //     println!(
-                //         "iter: {:02} target: {target:02}, label: {label}, out: {output:.3}, err: {:.6}, l2: {l2}, dot: {f:.4}",
-                //         local_iter,
-                //         (label - output as f32)
-                //     );
-                // }
-
                 // Multiply the error by the output layer weights.
                 // (I think this is the gradient calculation?)
                 // Accumulate these gradients over all of the negative samples.
@@ -349,13 +346,13 @@ pub fn train_model_thread(
             // Loop over the positions in the context window (skipping the word at
             // the center). 'a' is just the offset within the window, it's not
             // the index relative to the beginning of the sentence.
-            for a in b..window * 2 + 1 - b {
-                if a == window {
+            for a in b..params.window * 2 + 1 - b {
+                if a == params.window {
                     continue;
                 }
                 // Convert the window offset 'a' into an index 'c' into the sentence
                 // array.
-                let c: isize = sentence_position as isize - window as isize + a as isize;
+                let c: isize = sentence_position as isize - params.window as isize + a as isize;
 
                 // Verify c isn't outisde the bounds of the sentence.
                 if c < 0 || c >= sentence_length as isize {
