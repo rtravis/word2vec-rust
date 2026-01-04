@@ -1,4 +1,4 @@
 [package]
-name = "w2v_rs"
+name = "word2vec-rust"
 version = "0.1.0"
 edition = "2024"

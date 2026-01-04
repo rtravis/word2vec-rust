@@ -16,8 +16,8 @@
 use std::fs::metadata;
 use std::sync::atomic::AtomicU64;
 
-use w2v_rs::nnet::{NeuralNet, TrainigParams, TrainigProgress, train_model_thread};
-use w2v_rs::vocab::Vocabulary;
+use word2vec_rust::nnet::{NeuralNet, TrainigParams, TrainigProgress, train_model_thread};
+use word2vec_rust::vocab::Vocabulary;
 
 fn train(
     training_file: &str,
