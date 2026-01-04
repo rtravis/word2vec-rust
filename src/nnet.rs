@@ -88,6 +88,13 @@ fn dot_product(vec1: &[f32], vec2: &[f32]) -> f32 {
         .fold(0.0, |acc, cur| acc + cur.0 * cur.1)
 }
 
+// /// y <- a * x + y, named after Fortran's axpy
+// fn axpy(a: f32, x: &[f32], y: &mut [f32]) {
+//     x.iter()
+//         .zip(y.iter_mut())
+//         .for_each(|(src, dest)| *dest += a * src);
+// }
+
 const MAX_SENTENCE_LENGTH: usize = 1024;
 
 /// train the word2vec neural net `net` with training data found in `training_file`
@@ -123,7 +130,7 @@ pub fn train_model_thread(
     let window: usize = 5; // the train window parameter
     let total_iter = 1;
     let mut local_iter = total_iter; // training epochs
-    let negative_samples = 3; // number of negative samples
+    let negative_samples = 4; // number of negative samples
     let starting_alpha = 0.025;
     let mut alpha: f32 = starting_alpha;
 
@@ -202,6 +209,7 @@ pub fn train_model_thread(
                 break 'thread_loop;
             }
             word_count = 0;
+            last_word_count = 0;
             sentence_length = 0;
             // alpha *= 0.75;
             fi.reset(offset)?;
@@ -286,10 +294,17 @@ pub fn train_model_thread(
 
                 // Get the index of the target word in the output layer.
                 let l2 = target as usize * net.layer1_size;
+
+                // let target_output_weights = &mut net.syn1neg[l2..l2 + net.layer1_size];
+                let target_output_weights: &mut [f32];
+                unsafe {
+                    target_output_weights = net.syn1neg.get_unchecked_mut(l2..l2 + net.layer1_size);
+                }
+
                 // Calculate the dot product between:
                 //   neu1 - The average of the context word vectors.
                 //   syn1neg[l2] - The output weights for the target word.
-                let f: f32 = dot_product(&neu1, &net.syn1neg[l2..l2 + net.layer1_size]);
+                let f: f32 = dot_product(&neu1, target_output_weights);
 
                 // This block does two things:
                 //   1. Calculates the output of the network for this training
@@ -316,13 +331,13 @@ pub fn train_model_thread(
                 // (I think this is the gradient calculation?)
                 // Accumulate these gradients over all of the negative samples.
                 for i in 0..net.layer1_size {
-                    neu1e[i] += err * net.syn1neg[l2 + i];
+                    neu1e[i] += err * target_output_weights[i];
                 }
 
                 // Update the output layer weights by multiplying the output error
                 // by the average of the context word vectors.
                 for i in 0..net.layer1_size {
-                    net.syn1neg[l2 + i] += err * neu1[i];
+                    target_output_weights[i] += err * neu1[i];
                 }
             }
 
@@ -355,7 +370,6 @@ pub fn train_model_thread(
                 // Add the gradient in the vector `neu1e` to the word vector for
                 // the current context word.
                 // syn0[last_word * layer1_size] <-- Accesses the word vector.
-                // for (c = 0; c < layer1_size; c++) syn0[c + last_word * layer1_size] += neu1e[c];
                 for i in 0..net.layer1_size {
                     net.syn0[last_word as usize * net.layer1_size + i] += neu1e[i];
                 }
