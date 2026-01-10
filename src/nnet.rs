@@ -15,7 +15,9 @@
 
 use std::fs::File;
 use std::io::{BufWriter, Write};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::ptr::slice_from_raw_parts_mut;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering, fence};
 use std::time::Instant;
 
 use crate::tokenizer::FileTokenIterator;
@@ -68,9 +70,10 @@ impl NeuralNet {
     ) -> Result<(), std::io::Error> {
         let mut buf_writer: BufWriter<File> = BufWriter::new(File::create(output_file_name)?);
         writeln!(buf_writer, "{} {}", self.vocab_size, self.layer1_size)?;
+        let syn0 = &self.syn0;
         for (idx, word) in vocab.into_iter().enumerate() {
             write!(buf_writer, "{word} ")?;
-            let word_vec = &self.syn0[idx * self.layer1_size..(idx + 1) * self.layer1_size];
+            let word_vec = &syn0[idx * self.layer1_size..(idx + 1) * self.layer1_size];
             if binary {
                 unsafe {
                     let data = std::slice::from_raw_parts(
@@ -98,7 +101,7 @@ fn read_word_index(fi: &mut FileTokenIterator, vocab: &Vocabulary) -> Option<i32
 
 /// @return the dot product of 2 f32 vectors
 fn dot_product(vec1: &[f32], vec2: &[f32]) -> f32 {
-    assert!(vec1.len() == vec2.len());
+    debug_assert!(vec1.len() == vec2.len());
     vec1.iter()
         .zip(vec2)
         .fold(0.0, |acc, cur| acc + cur.0 * cur.1)
@@ -130,22 +133,25 @@ const MAX_SENTENCE_LENGTH: usize = 1024;
 
 /// train the word2vec neural net `net` with training data found in `training_file`
 pub fn train_model_thread(
-    net: &mut NeuralNet,
+    net: Arc<NeuralNet>,
     vocab: &Vocabulary,
     thread_id: usize,
     params: &TrainigParams,
-    progress: &mut TrainigProgress,
+    progress: &TrainigProgress,
 ) -> Result<(), std::io::Error> {
     assert!(net.vocab_size == vocab.len());
+    assert!(net.vocab_size * net.layer1_size == net.syn0.len());
+    assert!(net.syn0.len() == net.syn1neg.len());
 
     let offset = params.training_file_size / params.num_threads as u64 * thread_id as u64;
     let mut fi = FileTokenIterator::new(params.training_file, offset)?;
     let mut eof_reached: bool = false;
+    let layer1_size = net.layer1_size;
 
-    let mut neu1: Vec<f32> = Vec::with_capacity(net.layer1_size);
-    neu1.resize(net.layer1_size, 0.0);
-    let mut neu1e: Vec<f32> = Vec::with_capacity(net.layer1_size);
-    neu1e.resize(net.layer1_size, 0.0);
+    let mut neu1: Vec<f32> = Vec::with_capacity(layer1_size);
+    neu1.resize(layer1_size, 0.0);
+    let mut neu1e: Vec<f32> = Vec::with_capacity(layer1_size);
+    neu1e.resize(layer1_size, 0.0);
 
     let mut rand_gen = LcRandomGen::new(thread_id as i64);
     // progress tracking
@@ -174,7 +180,7 @@ pub fn train_model_thread(
             // doing and not just the current pass.
             if params.debug_mode > 1 {
                 print!(
-                    "\rAlpha: {alpha:.06} Progress: {:.02}%  Words/thread/sec: {:.02}k ",
+                    "\rAlpha: {alpha:.06} Progress: {:.02}%  Words/sec: {:.02}k ",
                     wc / (params.total_iter * vocab.train_words() + 1) as f64 * 100_f64,
                     (wc / 1000_f64) / start.elapsed().as_secs_f64()
                 );
@@ -198,7 +204,8 @@ pub fn train_model_thread(
         if sentence_length == 0 {
             loop {
                 let idx = match read_word_index(&mut fi, vocab) {
-                    Some(-1) => continue,
+                    Some(x) if x < 0 => continue,
+                    Some(x) if x as usize >= net.vocab_size => continue,
                     Some(x) => x,
                     None => {
                         eof_reached = true;
@@ -239,9 +246,8 @@ pub fn train_model_thread(
         }
 
         let word = sentence[sentence_position];
-        if word == -1 {
-            continue; // this condition is probably not needed
-        }
+        // assertion taken care of when filling sentence
+        debug_assert!(word >= 0 && (word as usize) < net.vocab_size);
 
         neu1.fill(0.0);
         // `cw` stores the context word count
@@ -257,12 +263,14 @@ pub fn train_model_thread(
                 continue;
             }
 
-            let last_word = sentence[c as usize];
-            assert!(last_word != -1);
+            let last_word = sentence[c as usize] as usize;
 
             // sum all the context word vectors and store the result in neu1
-            let net_word_index = last_word as usize * net.layer1_size;
-            let word_vec = &net.syn0[net_word_index..net_word_index + net.layer1_size];
+            let net_word_index = last_word * layer1_size;
+            let word_vec = unsafe {
+                net.syn0
+                    .get_unchecked(net_word_index..net_word_index + layer1_size)
+            };
             for i in 0..neu1.len() {
                 neu1[i] += word_vec[i];
             }
@@ -278,6 +286,7 @@ pub fn train_model_thread(
             for n in &mut neu1 {
                 *n /= cw as f32;
             }
+
             // NEGATIVE SAMPLING
             // Rather than performing backpropagation for every word in our
             // vocabulary, we only perform it for the positive sample and a few
@@ -301,25 +310,21 @@ pub fn train_model_thread(
                     if target == word {
                         continue;
                     }
-
-                    // if sentence[0..sentence_length].contains(&target) {
-                    //     continue;
-                    // }
-
+                    // this condition allows us to use unsafe code to index the nets
+                    if target < 0 || target as usize >= net.vocab_size {
+                        continue;
+                    }
                     // Mark this as a negative example.
                     label = 0.0;
                 }
+
                 // At this point, target might either be the positive sample or a
                 // negative sample, depending on the value of `label`.
 
                 // Get the index of the target word in the output layer.
-                let l2 = target as usize * net.layer1_size;
-
-                // let target_output_weights = &mut net.syn1neg[l2..l2 + net.layer1_size];
-                let target_output_weights: &mut [f32];
-                unsafe {
-                    target_output_weights = net.syn1neg.get_unchecked_mut(l2..l2 + net.layer1_size);
-                }
+                let l2 = target as usize * layer1_size;
+                let target_output_weights =
+                    unsafe { net.syn1neg.get_unchecked(l2..l2 + layer1_size) };
 
                 // Calculate the dot product between:
                 //   neu1 - The average of the context word vectors.
@@ -342,14 +347,24 @@ pub fn train_model_thread(
                 // Multiply the error by the output layer weights.
                 // (I think this is the gradient calculation?)
                 // Accumulate these gradients over all of the negative samples.
-                for i in 0..net.layer1_size {
+                for i in 0..layer1_size {
                     neu1e[i] += err * target_output_weights[i];
                 }
 
                 // Update the output layer weights by multiplying the output error
                 // by the average of the context word vectors.
-                for i in 0..net.layer1_size {
-                    target_output_weights[i] += err * neu1[i];
+                unsafe {
+                    let target_output_weights_mut = slice_from_raw_parts_mut(
+                        target_output_weights.as_ptr().cast_mut(),
+                        target_output_weights.len(),
+                    );
+
+                    // TODO: memory fence is not enough, use proper synchronization w/o affecting performance
+                    fence(Ordering::Acquire);
+                    for (i, n) in neu1.iter().enumerate() {
+                        (*target_output_weights_mut)[i] += n;
+                    }
+                    fence(Ordering::Release);
                 }
             }
 
@@ -376,14 +391,26 @@ pub fn train_model_thread(
 
                 // Get the context word. That is, get the id of the word (its index in
                 // the vocab table).
-                let last_word = sentence[c as usize];
-                assert!(last_word != -1);
+                let last_word = sentence[c as usize] as usize;
 
                 // Add the gradient in the vector `neu1e` to the word vector for
                 // the current context word.
                 // syn0[last_word * layer1_size] <-- Accesses the word vector.
-                for i in 0..net.layer1_size {
-                    net.syn0[last_word as usize * net.layer1_size + i] += neu1e[i];
+                let word_vector = unsafe {
+                    net.syn0
+                        .get_unchecked(last_word * layer1_size..(last_word + 1) * layer1_size)
+                };
+                unsafe {
+                    let mutable_unsafe_slice = slice_from_raw_parts_mut(
+                        word_vector.as_ptr().cast_mut(),
+                        word_vector.len(),
+                    );
+                    // TODO: memory fence is not enough, use proper synchronization w/o affecting performance
+                    fence(Ordering::Acquire);
+                    for (i, err) in neu1e.iter().enumerate() {
+                        (*mutable_unsafe_slice)[i] += err;
+                    }
+                    fence(Ordering::Release);
                 }
             }
         }

@@ -14,7 +14,9 @@
 //  limitations under the License.
 
 use std::fs::metadata;
+use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
+use std::thread;
 
 use word2vec_rust::nnet::{NeuralNet, TrainigParams, TrainigProgress, train_model_thread};
 use word2vec_rust::vocab::Vocabulary;
@@ -27,12 +29,11 @@ fn train(
     debug_mode: i32,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let training_file_size = metadata(training_file)?.len();
-    let vocab: Vocabulary;
-    if vocab_file.is_empty() {
-        vocab = Vocabulary::learn_vocabulary_from_training_file(training_file, 2)?;
+    let vocab: Vocabulary = if vocab_file.is_empty() {
+        Vocabulary::learn_vocabulary_from_training_file(training_file, 2)?
     } else {
-        vocab = Vocabulary::load_from_file(vocab_file)?;
-    }
+        Vocabulary::load_from_file(vocab_file)?
+    };
 
     if debug_mode > 0 {
         vocab.debug_print_summary();
@@ -42,7 +43,7 @@ fn train(
         if debug_mode > 0 {
             println!("Saving vocabulary to file: '{save_vocab_file}'");
         }
-        vocab.save_to_file(&save_vocab_file)?;
+        vocab.save_to_file(save_vocab_file)?;
     }
 
     if output_file.is_empty() {
@@ -50,11 +51,10 @@ fn train(
         return Ok(());
     }
 
-    let mut net = NeuralNet::new(vocab.len(), 100);
     let params = TrainigParams {
         training_file,
         training_file_size,
-        num_threads: 1,
+        num_threads: 2,
         window: 5,
         total_iter: 1,
         negative_samples: 4,
@@ -62,12 +62,26 @@ fn train(
         debug_mode,
     };
 
-    let mut progress = TrainigProgress {
+    let progress = TrainigProgress {
         word_count_actual: AtomicU64::new(0),
     };
 
-    train_model_thread(&mut net, &vocab, 0, &params, &mut progress)?;
-    net.save(&vocab, &output_file, true)?;
+    let net = NeuralNet::new(vocab.len(), 100);
+    let net = Arc::new(net);
+
+    thread::scope(|scope| {
+        // we don't need these "moved", but "thread_id" has to be moved
+        let vocab = &vocab;
+        let params = &params;
+        let progress = &progress;
+
+        for thread_id in 0..params.num_threads {
+            let net = Arc::clone(&net);
+            scope.spawn(move || train_model_thread(net, vocab, thread_id, params, progress));
+        }
+    });
+
+    net.save(&vocab, output_file, true)?;
     Ok(())
 }
 

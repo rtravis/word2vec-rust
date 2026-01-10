@@ -298,11 +298,7 @@ impl Vocabulary {
         });
 
         let mut frac: f64 = f64::powf(self.words[0].count as f64, WORD_POWER) / train_words_pow;
-
-        self.unigram_table.reserve(UNIGRAM_TABLE_SIZE);
-        unsafe {
-            self.unigram_table.set_len(UNIGRAM_TABLE_SIZE);
-        }
+        self.unigram_table.resize(UNIGRAM_TABLE_SIZE, -1);
 
         let mut word_idx: usize = 0;
         for (idx, tab_val) in self.unigram_table.iter_mut().enumerate() {
