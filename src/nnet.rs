@@ -17,9 +17,10 @@ use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::ptr::slice_from_raw_parts_mut;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering, fence};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
+use crate::mem_block_lock::MemBlockLocker;
 use crate::tokenizer::FileTokenIterator;
 use crate::vocab::Vocabulary;
 
@@ -28,6 +29,7 @@ pub struct NeuralNet {
     layer1_size: usize,
     syn0: Vec<f32>,
     syn1neg: Vec<f32>,
+    locker: MemBlockLocker,
 }
 
 struct LcRandomGen {
@@ -38,6 +40,7 @@ impl LcRandomGen {
     fn new(seed: i64) -> LcRandomGen {
         LcRandomGen { state: seed }
     }
+
     fn next_rand(&mut self) -> i64 {
         self.state = self.state.wrapping_mul(25214903917).wrapping_add(11);
         self.state
@@ -52,6 +55,7 @@ impl NeuralNet {
             layer1_size,
             syn0: Vec::with_capacity(size),
             syn1neg: Vec::with_capacity(size),
+            locker: MemBlockLocker::new(),
         };
 
         let mut lc_rand = LcRandomGen::new(1);
@@ -217,6 +221,10 @@ pub fn train_model_thread(
 
                 // word 0 is the special token "</s>" which indicates the end of a sentence
                 if idx == 0 {
+                    // an empty sentence, or one consisting only of out-of-vocabulary words
+                    if sentence_length == 0 {
+                        continue;
+                    }
                     break;
                 }
 
@@ -359,12 +367,11 @@ pub fn train_model_thread(
                         target_output_weights.len(),
                     );
 
-                    // TODO: memory fence is not enough, use proper synchronization w/o affecting performance
-                    fence(Ordering::Acquire);
+                    net.locker.lock(target as usize);
                     for (i, n) in neu1.iter().enumerate() {
                         (*target_output_weights_mut)[i] += n;
                     }
-                    fence(Ordering::Release);
+                    net.locker.unlock(target as usize);
                 }
             }
 
@@ -405,12 +412,12 @@ pub fn train_model_thread(
                         word_vector.as_ptr().cast_mut(),
                         word_vector.len(),
                     );
-                    // TODO: memory fence is not enough, use proper synchronization w/o affecting performance
-                    fence(Ordering::Acquire);
+
+                    net.locker.lock(last_word);
                     for (i, err) in neu1e.iter().enumerate() {
                         (*mutable_unsafe_slice)[i] += err;
                     }
-                    fence(Ordering::Release);
+                    net.locker.unlock(last_word);
                 }
             }
         }
