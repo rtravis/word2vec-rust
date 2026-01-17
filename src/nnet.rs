@@ -24,6 +24,24 @@ use crate::mem_block_lock::MemBlockLocker;
 use crate::tokenizer::FileTokenIterator;
 use crate::vocab::Vocabulary;
 
+
+pub struct TrainigParams {
+    pub training_file: String,
+    pub training_file_size: u64,
+    pub vocab_file: String,
+    pub save_vocab_file: String,
+    pub output_file: String,
+    pub vectors_size: usize,
+    pub window: usize,         // the train window parameter
+    pub total_iter: u64,       // number of training epochs
+    pub negative_samples: i32, // number of negative samples
+    pub num_threads: usize,    // the total number of training threads
+    pub starting_alpha: f32,   // the starting learning rate
+    pub debug_mode: i32,
+    pub min_count: u32,
+    pub binary: bool,
+}
+
 pub struct NeuralNet {
     vocab_size: usize,
     layer1_size: usize,
@@ -118,17 +136,6 @@ fn dot_product(vec1: &[f32], vec2: &[f32]) -> f32 {
 //         .for_each(|(src, dest)| *dest += a * src);
 // }
 
-pub struct TrainigParams<'a> {
-    pub training_file: &'a str,
-    pub training_file_size: u64,
-    pub num_threads: usize,    // the total number of training threads
-    pub window: usize,         // the train window parameter
-    pub total_iter: u64,       // number of training epochs
-    pub negative_samples: i32, // number of negative samples
-    pub starting_alpha: f32,   // the starting learning rate
-    pub debug_mode: i32,
-}
-
 pub struct TrainigProgress {
     pub word_count_actual: AtomicU64,
 }
@@ -148,7 +155,7 @@ pub fn train_model_thread(
     assert!(net.syn0.len() == net.syn1neg.len());
 
     let offset = params.training_file_size / params.num_threads as u64 * thread_id as u64;
-    let mut fi = FileTokenIterator::new(params.training_file, offset)?;
+    let mut fi = FileTokenIterator::new(&params.training_file, offset)?;
     let mut eof_reached: bool = false;
     let layer1_size = net.layer1_size;
 
