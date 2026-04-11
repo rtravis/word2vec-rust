@@ -13,8 +13,10 @@
 //  See the License for the specific language governing permissions and
 //  limitations under the License.
 
+use core::str;
 use std::fs::File;
-use std::io::{BufWriter, Write};
+use std::io::ErrorKind::InvalidData;
+use std::io::{BufRead, BufReader, BufWriter, Error, Read, Write};
 use std::ptr::slice_from_raw_parts_mut;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -23,7 +25,6 @@ use std::time::Instant;
 use crate::mem_block_lock::MemBlockLocker;
 use crate::tokenizer::FileTokenIterator;
 use crate::vocab::Vocabulary;
-
 
 pub struct TrainigParams {
     pub training_file: String,
@@ -113,6 +114,82 @@ impl NeuralNet {
         }
 
         Ok(())
+    }
+
+    pub fn load(
+        vectors_file_name: &str,
+        binary: bool,
+    ) -> Result<(Self, Vec<String>), Box<dyn std::error::Error>> {
+        let mut buf_reader: BufReader<File> = BufReader::new(File::open(vectors_file_name)?);
+        let mut first_line = vec![];
+        buf_reader
+            .by_ref()
+            .take(64)
+            .read_until(b'\n', &mut first_line)?;
+        let first_line = String::from_utf8(first_line)?;
+        let mut tokens = first_line
+            .split(char::is_whitespace)
+            .take(2)
+            .map(|s| s.parse::<usize>());
+
+        let word_count: usize;
+        let size: usize;
+        match (tokens.next(), tokens.next()) {
+            (Some(Ok(wc)), Some(Ok(sz))) => {
+                word_count = wc;
+                size = sz;
+            }
+            _ => return Err(Box::new(Error::new(InvalidData, "Invalid file header"))),
+        }
+
+        let mut words = vec![];
+        let mut net = NeuralNet::new(word_count, size);
+        for idx in 0..word_count {
+            let mut word_buf = Vec::new();
+            let n = buf_reader.read_until(b' ', &mut word_buf)?;
+            if word_buf.is_empty() || word_buf[n - 1] != b' ' {
+                return Err(Box::new(Error::new(
+                    InvalidData,
+                    format!("Unexpected character at word {n}"),
+                )));
+            }
+
+            words.push(String::from_utf8(word_buf[..n - 1].to_vec())?);
+
+            let word_vec = &mut net.syn0[idx * net.layer1_size..(idx + 1) * net.layer1_size];
+            if binary {
+                unsafe {
+                    let data = std::slice::from_raw_parts_mut(
+                        word_vec.as_mut_ptr() as *mut u8,
+                        word_vec.len() * std::mem::size_of_val(&word_vec[0]),
+                    );
+                    buf_reader.read_exact(data)?;
+                    buf_reader.consume(1); // discard the newline
+                }
+            } else {
+                let mut v = vec![];
+                buf_reader.read_until(b'\n', &mut v)?;
+
+                let mut err = Ok(0.0f32);
+                v.split(u8::is_ascii_whitespace)
+                    .zip(word_vec.iter_mut())
+                    .scan((), |_, (src, dest)| {
+                        match String::from_utf8_lossy(src).parse::<f32>() {
+                            Ok(f) => {
+                                *dest = f;
+                                Some(())
+                            }
+                            e => {
+                                err = e;
+                                None
+                            }
+                        }
+                    })
+                    .for_each(|_| {});
+                err?;
+            }
+        }
+        Ok((net, words))
     }
 }
 

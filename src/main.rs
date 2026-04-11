@@ -68,25 +68,6 @@ fn train(params: &mut TrainigParams) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/*
-WORD VECTOR estimation toolkit v 0.1c
-
-Options:
-Parameters for training:
-        -sample <float>
-                Set threshold for occurrence of words. Those that appear with higher frequency in the training data
-                will be randomly down-sampled; default is 1e-3, useful range is (0, 1e-5)
-        -hs <int>
-                Use Hierarchical Softmax; default is 0 (not used)
-        -classes <int>
-                Output word classes rather than word vectors; default number of classes is 0 (vectors are written)
-        -cbow <int>
-                Use the continuous bag of words model; default is 1 (use 0 for skip-gram model)
-
-Examples:
-./word2vec -train data.txt -output vec.txt -size 200 -window 5 -sample 1e-4 -negative 5 -hs 0 -binary 0 -cbow 1 -iter 3
-*/
-
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut params = TrainigParams {
         training_file: String::new(),
