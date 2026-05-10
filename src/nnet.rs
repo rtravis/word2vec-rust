@@ -51,6 +51,22 @@ pub struct NeuralNet {
     locker: MemBlockLocker,
 }
 
+pub struct WordVecs {
+    pub vec_size: usize,
+    pub word_vectors: Vec<f32>,
+    pub words: Vec<String>,
+}
+
+impl WordVecs {
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+    pub fn len(&self) -> usize {
+        self.words.len()
+    }
+}
+
 struct LcRandomGen {
     state: i64,
 }
@@ -85,7 +101,7 @@ impl NeuralNet {
         net
     }
 
-    pub fn save(
+    pub fn save_word_vecs(
         &self,
         vocab: &Vocabulary,
         output_file_name: &str,
@@ -116,10 +132,10 @@ impl NeuralNet {
         Ok(())
     }
 
-    pub fn load(
+    pub fn load_word_vecs(
         vectors_file_name: &str,
         binary: bool,
-    ) -> Result<(Self, Vec<String>), Box<dyn std::error::Error>> {
+    ) -> Result<WordVecs, Box<dyn std::error::Error>> {
         let mut buf_reader: BufReader<File> = BufReader::new(File::open(vectors_file_name)?);
         let mut first_line = vec![];
         buf_reader
@@ -142,8 +158,15 @@ impl NeuralNet {
             _ => return Err(Box::new(Error::new(InvalidData, "Invalid file header"))),
         }
 
-        let mut words = vec![];
-        let mut net = NeuralNet::new(word_count, size);
+        let mut result = WordVecs {
+            vec_size: word_count,
+            word_vectors: Vec::with_capacity(word_count * size),
+            words: Vec::new(),
+        };
+
+        // set the size for the word vectors
+        result.word_vectors.resize(word_count * size, 0.0);
+
         for idx in 0..word_count {
             let mut word_buf = Vec::new();
             let n = buf_reader.read_until(b' ', &mut word_buf)?;
@@ -154,9 +177,11 @@ impl NeuralNet {
                 )));
             }
 
-            words.push(String::from_utf8(word_buf[..n - 1].to_vec())?);
+            result
+                .words
+                .push(String::from_utf8(word_buf[..n - 1].to_vec())?);
 
-            let word_vec = &mut net.syn0[idx * net.layer1_size..(idx + 1) * net.layer1_size];
+            let word_vec = &mut result.word_vectors[idx * size..(idx + 1) * size];
             if binary {
                 unsafe {
                     let data = std::slice::from_raw_parts_mut(
@@ -189,7 +214,9 @@ impl NeuralNet {
                 err?;
             }
         }
-        Ok((net, words))
+
+        assert!(result.len() == word_count);
+        Ok(result)
     }
 }
 

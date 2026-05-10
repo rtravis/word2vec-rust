@@ -64,7 +64,7 @@ fn train(params: &mut TrainigParams) -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    net.save(&vocab, &params.output_file, params.binary)?;
+    net.save_word_vecs(&vocab, &params.output_file, params.binary)?;
     Ok(())
 }
 
@@ -157,11 +157,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             "--binary" => {
                 // Save the resulting vectors in binary moded; default is 0 (off)
-                if let Some(val) = args.next().and_then(|x| x.parse().ok()) {
-                    params.binary = val;
+                if let Some(val) = args.next().and_then(|x| x.parse::<u32>().ok()) {
+                    params.binary = val != 0;
                 } else {
                     panic!(
-                        "No valid value specified for parameter --alpha, must be a fraction in (0, 1)"
+                        "No valid value specified for parameter --binary, must be 0 or 1"
                     );
                 }
             }

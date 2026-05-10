@@ -20,5 +20,4 @@ where `TRAINING_FILE` is the file that contains newline delimited sentences and 
 
 The word2vec C project does not include code for parsing and tokenizing your text. It simply accepts a training file with words separated by whitespace (spaces, tabs, or newlines). This means that you'll need to handle the removal of things like punctuation separately.
 
-The code expects the text to be divided into sentences (with a default maximum length of 1,000 words). The end of a sentence is marked by a single newline character "\n"--that is, there should be one sentence per line in the file.
-
+The code expects the text to be divided into sentences (with a default maximum length of 1,000 words). The end of a sentence is marked by a single newline character "\n" -- that is, there should be one sentence per line in the file.
