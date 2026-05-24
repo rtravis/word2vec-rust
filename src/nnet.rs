@@ -458,9 +458,20 @@ pub fn train_model_thread(
                 //      subtracting the network output from the desired output,
                 //      and finally multiply this by the learning rate.
 
-                // activation function: 1 / (1 + e^(-x)) = e^x / (e^x + 1)
-                let expx = f64::exp(f as f64);
-                let output = expx / (expx + 1.0);
+                let output: f64;
+                // clip `f` so that exponentiation is not generating Inf causing
+                // the activation function result to be NaN
+                if f < -6.0 {
+                    output = 0.0;
+                } else if f > 6.0 {
+                    output = 1.0;
+                } else {
+                    // activation function: 1 / (1 + e^(-x)) = e^x / (e^x + 1)
+                    // exponentiation is safe here as f is in [-6, 6]
+                    let expx = f64::exp(f as f64);
+                    output = expx / (expx + 1.0);
+                }
+
                 let err = (label - output as f32) * alpha;
 
                 // Multiply the error by the output layer weights.
@@ -480,7 +491,7 @@ pub fn train_model_thread(
 
                     net.locker.lock(target as usize);
                     for (i, n) in neu1.iter().enumerate() {
-                        (*target_output_weights_mut)[i] += n;
+                        (*target_output_weights_mut)[i] += err * n;
                     }
                     net.locker.unlock(target as usize);
                 }
