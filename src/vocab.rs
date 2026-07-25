@@ -312,19 +312,13 @@ impl Vocabulary {
 }
 
 pub struct VocabularyIter<'a> {
-    vocab: &'a Vocabulary,
-    i: usize,
+    i: core::slice::Iter<'a, WordInfo>,
 }
 
 impl<'a> Iterator for VocabularyIter<'a> {
     type Item = &'a str;
     fn next(&mut self) -> Option<Self::Item> {
-        if self.i >= self.vocab.words.len() {
-            None
-        } else {
-            self.i += 1;
-            Some(&self.vocab.words[self.i - 1].word)
-        }
+        self.i.next().map(|w| &w.word[..])
     }
 }
 
@@ -332,6 +326,6 @@ impl<'a> IntoIterator for &'a Vocabulary {
     type Item = &'a str;
     type IntoIter = VocabularyIter<'a>;
     fn into_iter(self) -> Self::IntoIter {
-        VocabularyIter { vocab: self, i: 0 }
+        VocabularyIter { i: self.words[..].iter() }
     }
 }

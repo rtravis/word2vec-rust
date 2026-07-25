@@ -11,7 +11,11 @@
 				"kind": "build",
 				"isDefault": false
 			},
-			"label": "rust: cargo check"
+			"label": "rust: cargo check",
+			"presentation": {
+				"clear": true,
+				"showReuseMessage": false
+			}
 		},
 		{
 			"type": "cargo",
@@ -35,7 +39,11 @@
 				"$rustc"
 			],
 			"group": "build",
-			"label": "rust: cargo clippy"
+			"label": "rust: cargo clippy",
+			"presentation": {
+				"clear": true,
+				"showReuseMessage": false
+			}
 		}
 	]
 }
