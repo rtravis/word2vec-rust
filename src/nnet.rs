@@ -17,7 +17,9 @@ use core::str;
 use std::fs::File;
 use std::io::ErrorKind::InvalidData;
 use std::io::{BufRead, BufReader, BufWriter, Error, Read, Write};
+use std::num::Wrapping;
 use std::ptr::slice_from_raw_parts_mut;
+use std::slice::ChunksExact;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
@@ -57,28 +59,55 @@ pub struct WordVecs {
     pub words: Vec<String>,
 }
 
-impl WordVecs {
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
+impl<'a> IntoIterator for &'a WordVecs {
+    type Item = &'a [f32];
+    type IntoIter = ChunksExact<'a, f32>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.word_vectors[..].chunks_exact(self.vec_size)
     }
-    pub fn len(&self) -> usize {
-        self.words.len()
+}
+
+fn normalize_vec_in_place(v: &mut [f32]) {
+    let norm = v
+        .iter()
+        .fold(0.0, |acc, y| {
+            let y = *y as f64;
+            acc + (y * y)
+        })
+        .sqrt() as f32;
+
+    v.iter_mut().for_each(|x| *x /= norm);
+}
+
+impl WordVecs {
+    pub fn get_word_vec(&self, word: &str) -> Option<&[f32]> {
+        self.words.iter().position(|x| x == word).map(|idx| {
+            let pos = idx * self.vec_size;
+            &self.word_vectors[pos..pos + self.vec_size]
+        })
+    }
+
+    fn normalize_vectors(&mut self) {
+        for wv in self.word_vectors.chunks_exact_mut(self.vec_size) {
+            normalize_vec_in_place(wv);
+        }
     }
 }
 
 struct LcRandomGen {
-    state: i64,
+    state: Wrapping<i64>,
 }
 
 impl LcRandomGen {
     fn new(seed: i64) -> LcRandomGen {
-        LcRandomGen { state: seed }
+        LcRandomGen {
+            state: Wrapping(seed),
+        }
     }
 
     fn next_rand(&mut self) -> i64 {
-        self.state = self.state.wrapping_mul(25214903917).wrapping_add(11);
-        self.state
+        self.state = self.state * Wrapping(25214903917) + Wrapping(11);
+        self.state.0
     }
 }
 
@@ -135,6 +164,7 @@ impl NeuralNet {
     pub fn load_word_vecs(
         vectors_file_name: &str,
         binary: bool,
+        normalize_vecs: bool,
     ) -> Result<WordVecs, Box<dyn std::error::Error>> {
         let mut buf_reader: BufReader<File> = BufReader::new(File::open(vectors_file_name)?);
         let mut first_line = vec![];
@@ -159,7 +189,7 @@ impl NeuralNet {
         }
 
         let mut result = WordVecs {
-            vec_size: word_count,
+            vec_size: size,
             word_vectors: Vec::with_capacity(word_count * size),
             words: Vec::new(),
         };
@@ -215,7 +245,10 @@ impl NeuralNet {
             }
         }
 
-        assert!(result.len() == word_count);
+        assert!(result.words.len() == word_count);
+        if normalize_vecs {
+            result.normalize_vectors();
+        }
         Ok(result)
     }
 }

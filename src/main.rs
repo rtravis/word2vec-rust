@@ -12,12 +12,12 @@
 //  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 //  See the License for the specific language governing permissions and
 //  limitations under the License.
-
 use std::fs::metadata;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::thread;
 
+use word2vec_rust::distance::print_close_words;
 use word2vec_rust::nnet::{NeuralNet, TrainigParams, TrainigProgress, train_model_thread};
 use word2vec_rust::vocab::Vocabulary;
 
@@ -160,9 +160,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if let Some(val) = args.next().and_then(|x| x.parse::<u32>().ok()) {
                     params.binary = val != 0;
                 } else {
-                    panic!(
-                        "No valid value specified for parameter --binary, must be 0 or 1"
-                    );
+                    panic!("No valid value specified for parameter --binary, must be 0 or 1");
                 }
             }
             "-v" | "--read-vocab" => {
@@ -197,6 +195,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     panic!("No valid value specified for parameter --min-count, must be >= 1");
                 }
             }
+            "--distance" => {
+                // Example "distance" program that will load word projection vectors from
+                // `word_vecs_file`, ask the user to input words and print out all words that
+                // are most close to the input words. `word_vecs_file` is expected to be in the
+                // binary format.
+                if let Some(word_vecs_file) = args.next() {
+                    return print_close_words(&word_vecs_file);
+                } else {
+                    panic!("No valid value specified for parameter --min-count, must be >= 1");
+                }
+            }
             _ => {
                 if arg.starts_with('-') {
                     println!("Unkown argument {}", arg);
@@ -206,5 +215,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
-    train(&mut params)
+
+    if !params.training_file.is_empty()
+        && (!params.output_file.is_empty() || !params.vocab_file.is_empty())
+    {
+        train(&mut params)
+    } else {
+        Err("Wrong usage, read main.rs for program parameters.")?
+    }
 }
